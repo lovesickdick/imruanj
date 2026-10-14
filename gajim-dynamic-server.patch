@@ -1,25 +1,3 @@
-From b13383a3ca197efd1ea6f781dd12b0e2ea487d7d Mon Sep 17 00:00:00 2001
-From: muse <muse@local>
-Date: Wed, 14 Oct 2026 09:55:12 +0800
-Subject: [PATCH] =?UTF-8?q?=E5=8A=A8=E6=80=81=E6=9C=8D=E5=8A=A1=E5=99=A8?=
- =?UTF-8?q?=E5=8F=91=E7=8E=B0=EF=BC=9Atxt=20=E5=8F=96=E5=9F=9F=E5=90=8D=20?=
- =?UTF-8?q?+=20=E7=A8=8B=E5=BA=8F=E5=86=85=2063114=20+=20=E7=94=A8?=
- =?UTF-8?q?=E6=88=B7=E5=90=8D=E6=A8=A1=E5=BC=8F=20+=20=E9=9A=90=E8=97=8F?=
- =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E5=99=A8=E8=AE=BE=E7=BD=AE?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
----
- src/gajim/common/application.py         |   5 +-
- src/gajim/common/client.py              |  28 +++-
- src/gajim/common/server_discovery.py    |  98 +++++++++++++
- src/gajim/data/gui/wizard/login_page.ui |   4 +-
- src/gajim/gtk/account_wizard.py         | 178 ++++++++++++++++++------
- src/gajim/gtk/application.py            |   7 +
- 6 files changed, 274 insertions(+), 46 deletions(-)
- create mode 100644 src/gajim/common/server_discovery.py
-
 diff --git a/src/gajim/common/application.py b/src/gajim/common/application.py
 index 545dfe2..f3b8ea9 100644
 --- a/src/gajim/common/application.py
@@ -210,7 +188,7 @@ index 9687a7e..6f564f2 100644
          </child>
          <child>
 diff --git a/src/gajim/gtk/account_wizard.py b/src/gajim/gtk/account_wizard.py
-index 9298f8b..78089df 100644
+index 9298f8b..ecd8c0a 100644
 --- a/src/gajim/gtk/account_wizard.py
 +++ b/src/gajim/gtk/account_wizard.py
 @@ -41,6 +41,10 @@
@@ -224,7 +202,33 @@ index 9298f8b..78089df 100644
  from gajim.common.util.jid import validate_jid
  from gajim.common.util.text import get_country_flag_from_code
  
-@@ -263,9 +267,40 @@ def _get_proxy_data(self, advanced: bool) -> ProxyData | None:
+@@ -145,8 +149,12 @@ def _on_button_clicked(self, _page: Gtk.Widget, button_name: str) -> None:
+                 self._test_credentials()
+ 
+         elif button_name == "signup":
+-            self.get_page("signup").update_providers_list()
+-            self.show_page("signup", Gtk.StackTransitionType.SLIDE_LEFT)
++            # Customization: no provider-selection page. The server
++            # always comes from dynamic server discovery; go straight
++            # to registration against the discovered server. The user
++            # never sees or picks a server.
++            self._method = "signup"
++            self._register_with_server()
+ 
+     def _on_assistant_button_clicked(
+         self, _assistant: Assistant, button_name: str
+@@ -232,7 +240,9 @@ def _on_assistant_button_clicked(
+                     self.show_page(self._method, Gtk.StackTransitionType.SLIDE_RIGHT)
+ 
+             elif page == "form":
+-                self.show_page("signup", Gtk.StackTransitionType.SLIDE_RIGHT)
++                # Customization: signup (provider) page is skipped, so
++                # Back from the registration form returns to login.
++                self.show_page("login", Gtk.StackTransitionType.SLIDE_RIGHT)
+                 self.get_page("form").remove_form()
+                 self._disconnect()
+ 
+@@ -263,9 +273,40 @@ def _get_proxy_data(self, advanced: bool) -> ProxyData | None:
  
          return get_global_proxy()
  
@@ -266,7 +270,7 @@ index 9298f8b..78089df 100644
          client = NBXMPPClient(log_context="Account Wizard")
          client.set_domain(address.domain)
          client.set_username(address.localpart)
-@@ -273,10 +308,12 @@ def _get_base_client(
+@@ -273,10 +314,12 @@ def _get_base_client(
          client.set_ignore_tls_errors(ignore_all_errors)
          client.set_accepted_certificates(app.cert_store.get_certificates())
  
@@ -283,7 +287,7 @@ index 9298f8b..78089df 100644
  
          proxy_data = self._get_proxy_data(advanced)
          client.set_proxy(proxy_data)
-@@ -329,13 +366,22 @@ def _on_host_meta_response(obj: FileTransfer) -> None:
+@@ -329,13 +372,22 @@ def _on_host_meta_response(obj: FileTransfer) -> None:
  
      def _test_credentials(self, ignore_all_errors: bool = False) -> None:
          self._show_progress_page(_("Connecting..."), _("Connecting to server..."))
@@ -308,7 +312,7 @@ index 9298f8b..78089df 100644
  
          self._client.set_password(password)
          self._client.subscribe("login-successful", self._on_login_successful)
-@@ -343,7 +389,10 @@ def _test_credentials(self, ignore_all_errors: bool = False) -> None:
+@@ -343,7 +395,10 @@ def _test_credentials(self, ignore_all_errors: bool = False) -> None:
  
      def _test_anonymous_server(self, ignore_all_errors: bool = False) -> None:
          self._show_progress_page(_("Connecting..."), _("Connecting to server..."))
@@ -320,7 +324,7 @@ index 9298f8b..78089df 100644
          advanced = self.get_page("signup").is_advanced()
  
          address = JID(localpart=None, domain=domain, resource=None)
-@@ -351,13 +400,19 @@ def _test_anonymous_server(self, ignore_all_errors: bool = False) -> None:
+@@ -351,13 +406,19 @@ def _test_anonymous_server(self, ignore_all_errors: bool = False) -> None:
          self._client = self._get_base_client(
              address, Mode.ANONYMOUS_TEST, advanced, ignore_all_errors
          )
@@ -341,7 +345,7 @@ index 9298f8b..78089df 100644
          advanced = self.get_page("signup").is_advanced()
  
          address = JID(localpart=None, domain=domain, resource=None)
-@@ -365,10 +420,25 @@ def _register_with_server(self, ignore_all_errors: bool = False) -> None:
+@@ -365,10 +426,25 @@ def _register_with_server(self, ignore_all_errors: bool = False) -> None:
          self._client = self._get_base_client(
              address, Mode.REGISTER, advanced, ignore_all_errors
          )
@@ -367,7 +371,7 @@ index 9298f8b..78089df 100644
      def _on_login_successful(self, client: NBXMPPClient, _signal_name: str) -> None:
          assert client.domain is not None
          assert client.password is not None
-@@ -615,6 +685,9 @@ def __init__(self) -> None:
+@@ -615,6 +691,9 @@ def __init__(self) -> None:
          self._connect(self._log_in_button, "clicked", self._on_login)
          self._connect(self._sign_up_button, "clicked", self._on_signup)
  
@@ -377,7 +381,7 @@ index 9298f8b..78089df 100644
      def focus(self) -> None:
          self._log_in_address_entry.grab_focus()
  
-@@ -644,27 +717,39 @@ def _on_password_entry_activate(self, _entry: Gtk.Entry) -> None:
+@@ -644,27 +723,39 @@ def _on_password_entry_activate(self, _entry: Gtk.Entry) -> None:
          if self._log_in_button.get_sensitive():
              self._log_in_button.activate()
  
@@ -428,7 +432,7 @@ index 9298f8b..78089df 100644
              )
              return False
  
-@@ -672,18 +757,19 @@ def _validate_jid(self, address: str) -> bool:
+@@ -672,18 +763,19 @@ def _validate_jid(self, address: str) -> bool:
          return True
  
      def _set_complete(self, *args: Any) -> None:
@@ -455,7 +459,7 @@ index 9298f8b..78089df 100644
  
  
  @Gtk.Template(string=get_ui_string("wizard/signup_page.ui"))
-@@ -705,6 +791,15 @@ def __init__(self) -> None:
+@@ -705,6 +797,15 @@ def __init__(self) -> None:
          self._servers: list[dict[str, Any]] = []
          self._provider_list_request: FileTransfer | None = None
  
@@ -471,7 +475,7 @@ index 9298f8b..78089df 100644
          entry = self._server_comboboxtext_sign_up.get_child()
          assert isinstance(entry, Gtk.Entry)
          self._entry = entry
-@@ -732,18 +827,18 @@ def focus(self) -> None:
+@@ -732,18 +833,18 @@ def focus(self) -> None:
          self._entry.grab_focus()
  
      def update_providers_list(self) -> None:
@@ -501,7 +505,7 @@ index 9298f8b..78089df 100644
  
      def _on_download_provider_list_finished(self, obj: FileTransfer) -> None:
          self._provider_list_request = None
-@@ -864,7 +959,12 @@ def is_advanced(self) -> bool:
+@@ -864,7 +965,12 @@ def is_advanced(self) -> bool:
          return self._sign_up_advanced_checkbutton.get_active()
  
      def get_server(self) -> str:
@@ -515,6 +519,35 @@ index 9298f8b..78089df 100644
  
      def get_visible_buttons(self) -> list[str]:
          return ["back", "signup"]
+@@ -1245,6 +1351,7 @@ def __init__(self) -> None:
+ 
+         self._account: str | None = None
+         self._our_jid: str | None = None
++        self._our_username: str | None = None
+         self._label: str | None = None
+         self._color: str | None = None
+ 
+@@ -1259,7 +1366,9 @@ def __init__(self) -> None:
+     def set_account(self, account: str) -> None:
+         self._account = account
+         self._our_jid = app.get_jid_from_account(account)
+-        self._badge_preview.set_text(self._our_jid)
++        # Customization: show only the username, never the domain.
++        self._our_username = str(self._our_jid).split("@")[0]
++        self._badge_preview.set_text(self._our_username)
+         rgba = Gdk.RGBA()
+         rgba.parse(get_color_for_account(self._our_jid))
+         self._account_color_button.set_rgba(rgba)
+@@ -1280,7 +1389,8 @@ def _add_css_provider(self) -> Gtk.CssProvider:
+     def _on_name_changed(self, entry: Gtk.Entry):
+         assert self._our_jid is not None
+         self._label = entry.get_text()
+-        self._badge_preview.set_text(self._label or self._our_jid)
++        # Customization: badge fallback is the username, never the domain.
++        self._badge_preview.set_text(self._label or self._our_username)
+         self._save_config()
+ 
+     def _on_color_set(self, color_button: Gtk.ColorDialogButton, *args: Any):
 diff --git a/src/gajim/gtk/application.py b/src/gajim/gtk/application.py
 index d0233e3..9b125b6 100644
 --- a/src/gajim/gtk/application.py
@@ -533,6 +566,3 @@ index d0233e3..9b125b6 100644
          icon_theme = get_icon_theme()
          icon_theme.add_search_path(str(configpaths.get("ICONS")))
  
--- 
-2.43.0
-
