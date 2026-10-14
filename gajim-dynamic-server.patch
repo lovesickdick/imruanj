@@ -168,6 +168,31 @@ index ef8f188..4fc0611 100644
  
          if self._destroy_client:
              self._create_client()
+diff --git a/src/gajim/common/modules/contacts.py b/src/gajim/common/modules/contacts.py
+index 03f7105..f8f3060 100644
+--- a/src/gajim/common/modules/contacts.py
++++ b/src/gajim/common/modules/contacts.py
+@@ -504,8 +504,8 @@ def original_name(self) -> str:
+             return remote_name
+ 
+         if self._jid.is_domain:
+-            assert self._jid.domain is not None
+-            return self._jid.domain
++            # 域名不显示（用户无感）
++            return ""
+ 
+         assert self._jid.localpart is not None
+         return unescape_localpart(self._jid.localpart)
+@@ -1185,7 +1185,8 @@ def name(self) -> str:
+         if self._occupant is not None:
+             if nickname := self._occupant.nickname:
+                 return nickname
+-        return str(self.jid)
++        # 只显示昵称/用户名，不显示完整 JID（用户对域名零感知）
++        return self.jid.resource or self.jid.localpart or ""
+ 
+     @property
+     def real_jid(self) -> JID:
 diff --git a/src/gajim/common/server_discovery.py b/src/gajim/common/server_discovery.py
 new file mode 100644
 index 0000000..4e646ee
@@ -284,6 +309,78 @@ index 0000000..4e646ee
 +    if host is None:
 +        return None
 +    return f"{host}:{PORT_C2S}"
+diff --git a/src/gajim/common/util/muc.py b/src/gajim/common/util/muc.py
+index f17d1cc..1061116 100644
+--- a/src/gajim/common/util/muc.py
++++ b/src/gajim/common/util/muc.py
+@@ -157,7 +157,8 @@ def get_groupchat_name(client: types.Client, jid: JID) -> str:
+         if name := contact.get_name():
+             return name
+ 
+-    return jid.localpart or jid.domain
++    # 只显示房间名，域名不显示（用户无感）
++    return jid.localpart or ""
+ 
+ 
+ def get_group_chat_nick(account: str, room_jid: JID | str) -> str:
+diff --git a/src/gajim/data/gui/groupchat_affiliation.ui b/src/gajim/data/gui/groupchat_affiliation.ui
+index 658b80d..7c255fa 100644
+--- a/src/gajim/data/gui/groupchat_affiliation.ui
++++ b/src/gajim/data/gui/groupchat_affiliation.ui
+@@ -55,7 +55,7 @@
+                 <property name="resizable">1</property>
+                 <property name="sizing">fixed</property>
+                 <property name="min-width">150</property>
+-                <property name="title" translatable="yes">XMPP Address</property>
++                <property name="title" translatable="yes">Username</property>
+                 <property name="expand">1</property>
+                 <property name="clickable">1</property>
+                 <property name="sort-indicator">1</property>
+@@ -63,7 +63,7 @@
+                 <child>
+                   <object class="GtkCellRendererText" id="address_renderer">
+                     <property name="ellipsize">end</property>
+-                    <property name="placeholder-text">user@example.org</property>
++                    <property name="placeholder-text">username</property>
+                   </object>
+                   <attributes>
+                     <attribute name="editable">5</attribute>
+diff --git a/src/gajim/data/gui/groupchat_outcast.ui b/src/gajim/data/gui/groupchat_outcast.ui
+index 7b20d73..06d2745 100644
+--- a/src/gajim/data/gui/groupchat_outcast.ui
++++ b/src/gajim/data/gui/groupchat_outcast.ui
+@@ -4,11 +4,8 @@
+   <object class="GtkPopover" id="info_popover">
+     <property name="child">
+       <object class="GtkLabel">
+-        <property name="label" translatable="yes">&lt;b&gt;XMPP Address&lt;/b&gt;
+-&amp;lt;user@domain/resource&amp;gt; (only that resource matches)
+-&amp;lt;user@domain&amp;gt; (any resource matches)
+-&amp;lt;domain/resource&amp;gt; (only that resource matches)
+-&amp;lt;domain&amp;gt; (the domain itself matches, as does any user@domain or domain/resource)
++        <property name="label" translatable="yes">&lt;b&gt;Username&lt;/b&gt;
++Enter the username of the person to block.
+ </property>
+         <property name="use-markup">1</property>
+         <style>
+@@ -49,7 +46,7 @@
+                 <property name="resizable">1</property>
+                 <property name="sizing">fixed</property>
+                 <property name="min-width">150</property>
+-                <property name="title" translatable="yes">XMPP Address</property>
++                <property name="title" translatable="yes">Username</property>
+                 <property name="expand">1</property>
+                 <property name="clickable">1</property>
+                 <property name="sort-indicator">1</property>
+@@ -57,7 +54,7 @@
+                 <child>
+                   <object class="GtkCellRendererText" id="address_renderer">
+                     <property name="ellipsize">end</property>
+-                    <property name="placeholder-text">user@example.org</property>
++                    <property name="placeholder-text">username</property>
+                   </object>
+                   <attributes>
+                     <attribute name="editable">2</attribute>
 diff --git a/src/gajim/data/gui/wizard/login_page.ui b/src/gajim/data/gui/wizard/login_page.ui
 index 9687a7e..6f564f2 100644
 --- a/src/gajim/data/gui/wizard/login_page.ui
@@ -300,8 +397,22 @@ index 9687a7e..6f564f2 100644
            </object>
          </child>
          <child>
+diff --git a/src/gajim/gtk/account_page.py b/src/gajim/gtk/account_page.py
+index 70f25e9..b00333a 100644
+--- a/src/gajim/gtk/account_page.py
++++ b/src/gajim/gtk/account_page.py
+@@ -229,7 +229,8 @@ def _update_page(self) -> None:
+         self._update_account_label(account_label)
+         self._name_label.set_label(nick)
+ 
+-        self._our_jid_row.set_subtitle(str(self._contact.jid))
++        # 只显示用户名，不显示完整 JID（域名由后台处理，用户无感）
++        self._our_jid_row.set_subtitle(self._contact.jid.localpart or "")
+         self._status_selector.set_account(self._account)
+         self._status_message_row.set_account(self._account)
+ 
 diff --git a/src/gajim/gtk/account_wizard.py b/src/gajim/gtk/account_wizard.py
-index 9298f8b..ecd8c0a 100644
+index 9298f8b..4c18542 100644
 --- a/src/gajim/gtk/account_wizard.py
 +++ b/src/gajim/gtk/account_wizard.py
 @@ -41,6 +41,10 @@
@@ -518,7 +629,7 @@ index 9298f8b..ecd8c0a 100644
              self._log_in_address_entry.set_icon_tooltip_text(
 -                Gtk.EntryIconPosition.SECONDARY, _("Invalid Address")
 +                Gtk.EntryIconPosition.SECONDARY,
-+                _("Enter only your username, without @domain"),
++                _("Enter only your username"),
              )
              return False
  
@@ -572,7 +683,7 @@ index 9298f8b..ecd8c0a 100644
  
  
  @Gtk.Template(string=get_ui_string("wizard/signup_page.ui"))
-@@ -705,6 +797,15 @@ def __init__(self) -> None:
+@@ -705,11 +797,20 @@ def __init__(self) -> None:
          self._servers: list[dict[str, Any]] = []
          self._provider_list_request: FileTransfer | None = None
  
@@ -588,6 +699,12 @@ index 9298f8b..ecd8c0a 100644
          entry = self._server_comboboxtext_sign_up.get_child()
          assert isinstance(entry, Gtk.Entry)
          self._entry = entry
+         self._entry.set_activates_default(True)
+-        self._entry.set_placeholder_text("example.org")
++        self._entry.set_placeholder_text("")
+         self._entry.set_input_purpose(Gtk.InputPurpose.URL)
+ 
+         self._entry_completion = Gtk.EntryCompletion(
 @@ -732,18 +833,18 @@ def focus(self) -> None:
          self._entry.grab_focus()
  
@@ -661,6 +778,77 @@ index 9298f8b..ecd8c0a 100644
          self._save_config()
  
      def _on_color_set(self, color_button: Gtk.ColorDialogButton, *args: Any):
+diff --git a/src/gajim/gtk/add_contact.py b/src/gajim/gtk/add_contact.py
+index 7166234..8aefe72 100644
+--- a/src/gajim/gtk/add_contact.py
++++ b/src/gajim/gtk/add_contact.py
+@@ -23,6 +23,7 @@
+ from gajim.common import app
+ from gajim.common import types
+ from gajim.common.i18n import _
++from gajim.common.server_discovery import get_host as get_discovered_host
+ from gajim.common.modules.contacts import BareContact
+ from gajim.common.modules.util import as_task
+ from gajim.common.util.jid import validate_jid
+@@ -45,6 +46,17 @@ class SubscriptionData(TypedDict):
+     auto_auth: bool
+ 
+ 
++def _get_muc_service_jid(account: str) -> str:
++    client = app.get_client(account)
++    service_jid = client.get_module("MUC").service_jid
++    if service_jid is not None:
++        return str(service_jid)
++    host = get_discovered_host()
++    if host is not None:
++        return f"conference.{host}"
++    return "conference"
++
++
+ class AddContact(Assistant):
+     def __init__(
+         self,
+@@ -144,6 +156,9 @@ def _on_button_clicked(self, _assistant: Assistant, button_name: str) -> None:
+ 
+         if button_name == "join":
+             _, jid = address_page.get_account_and_jid()
++            # 只填了房间名，后台追加会议服务域名形成完整房间 JID
++            if "@" not in jid:
++                jid = f"{jid}@{_get_muc_service_jid(account)}"
+             open_window("GroupchatJoin", account=account, jid=jid)
+             self.close()
+ 
+@@ -154,6 +169,11 @@ def _start_disco(self) -> None:
+         address_page = self.get_page("address")
+         account, jid = address_page.get_account_and_jid()
+         assert account is not None
++        # 只填了用户名，后台追加动态发现的域名形成完整 JID
++        if "@" not in jid:
++            host = get_discovered_host()
++            if host is not None:
++                jid = f"{jid}@{host}"
+         self._disco_info(account, jid)
+ 
+     @as_task
+@@ -258,7 +278,8 @@ def __init__(self, account: str | None, jid: JID | None) -> None:
+             self._dropdown.select_key(account)
+ 
+         if jid is not None:
+-            self._address_entry.set_text(str(jid))
++            # 预填只显示用户名（域名由后台处理，用户无感）
++            self._address_entry.set_text(jid.localpart or "")
+ 
+         self._set_complete()
+ 
+@@ -312,7 +333,7 @@ def _set_complete(self, *args: Any) -> None:
+ 
+         client = app.get_client(self._account)
+         for contact in client.get_module("Roster").iter_contacts():
+-            if address == str(contact.jid):
++            if address == str(contact.jid) or address == contact.jid.localpart:
+                 self._show_icon(True)
+                 self._address_entry.set_icon_tooltip_text(
+                     Gtk.EntryIconPosition.SECONDARY,
 diff --git a/src/gajim/gtk/application.py b/src/gajim/gtk/application.py
 index d0233e3..9b125b6 100644
 --- a/src/gajim/gtk/application.py
@@ -678,4 +866,315 @@ index d0233e3..9b125b6 100644
 +
          icon_theme = get_icon_theme()
          icon_theme.add_search_path(str(configpaths.get("ICONS")))
+ 
+diff --git a/src/gajim/gtk/chat_banner.py b/src/gajim/gtk/chat_banner.py
+index 680b55d..6c8ca16 100644
+--- a/src/gajim/gtk/chat_banner.py
++++ b/src/gajim/gtk/chat_banner.py
+@@ -380,7 +380,8 @@ def _update_share_box(self) -> None:
+             self._share_menu_button.set_tooltip_text(_("Share Contact…"))
+         self._share_menu_button.set_sensitive(not self._contact.is_pm_contact)
+         self._share_menu_button.set_visible(not self._narrow)
+-        self._jid_label.set_text(str(self._contact.jid))
++        # 只显示用户名，不显示完整 JID（域名由后台处理，用户无感）
++        self._jid_label.set_text(self._contact.jid.localpart or "")
+ 
+     def _get_share_uri(self) -> str:
+         assert self._client is not None
+diff --git a/src/gajim/gtk/chat_function_page.py b/src/gajim/gtk/chat_function_page.py
+index 875c7f9..98b5cb0 100644
+--- a/src/gajim/gtk/chat_function_page.py
++++ b/src/gajim/gtk/chat_function_page.py
+@@ -186,7 +186,7 @@ def set_mode(
+         else:
+             self._heading.set_text(self._contact.name)
+ 
+-        self._subheading.set_text(str(self._contact.jid))
++        self._subheading.set_text(self._contact.jid.localpart or "")
+ 
+         if mode == FunctionMode.INVITE:
+             self._confirm_button.set_label(_("Invite"))
+diff --git a/src/gajim/gtk/contact_info.py b/src/gajim/gtk/contact_info.py
+index a6179df..3276b9e 100644
+--- a/src/gajim/gtk/contact_info.py
++++ b/src/gajim/gtk/contact_info.py
+@@ -225,9 +225,10 @@ def _fill_information_page(self) -> None:
+             )
+ 
+         if self._bare_contact is not None:
+-            jid = str(self._bare_contact.get_address())
++            # 只显示用户名，不显示完整 JID（域名由后台处理，用户无感）
++            jid = self._bare_contact.get_address().localpart or ""
+         else:
+-            jid = str(self.contact.get_address())
++            jid = self.contact.get_address().localpart or ""
+ 
+         self._ui.contact_jid_label.set_text(jid)
+         self._ui.contact_jid_label.set_tooltip_text(jid)
+diff --git a/src/gajim/gtk/contact_popover.py b/src/gajim/gtk/contact_popover.py
+index 56982be..0d6571e 100644
+--- a/src/gajim/gtk/contact_popover.py
++++ b/src/gajim/gtk/contact_popover.py
+@@ -96,7 +96,12 @@ def __init__(self, contact: BareContact) -> None:
+         if self._contact.status:
+             self._status_message.set_label(self._contact.status)
+ 
+-        self._xmpp_address.set_label(str(self._contact.jid), link_scheme="xmpp")
++        # 显示用户名，链接仍指向完整地址（用户界面上不显示域名）
++        self._xmpp_address.set_label(
++            self._contact.jid.localpart or "",
++            link_scheme="xmpp",
++            href=str(self._contact.jid),
++        )
+ 
+         self._connect(
+             self._contact_details_button, "clicked", self._on_contact_details_clicked
+@@ -204,12 +209,16 @@ def set_icon(self, icon: str | Gdk.Paintable | None) -> None:
+             self._image.set_from_paintable(icon)
+             self._icon = icon
+ 
+-    def set_label(self, text: str, link_scheme: str | None = None) -> None:
++    def set_label(
++        self, text: str, link_scheme: str | None = None, href: str | None = None
++    ) -> None:
+         self._text = text
+         self.set_visible(bool(text))
+ 
+         if link_scheme:
+-            self._label.set_markup(f"<a href='{link_scheme}:{text}'>{text}</a>")
++            # 显示文本与链接目标可分离：显示用户名，链接仍指向完整地址
++            target = href if href is not None else text
++            self._label.set_markup(f"<a href='{link_scheme}:{target}'>{text}</a>")
+         else:
+             self._label.set_text(text)
+ 
+diff --git a/src/gajim/gtk/dataform.py b/src/gajim/gtk/dataform.py
+index bb54cde..0e14430 100644
+--- a/src/gajim/gtk/dataform.py
++++ b/src/gajim/gtk/dataform.py
+@@ -763,7 +763,7 @@ def __init__(self, field: NBXMPPListMultiField, multi_field: JidMultiField) -> N
+         col = Gtk.TreeViewColumn()
+         cell = Gtk.CellRendererText()
+         cell.set_property("editable", True)
+-        cell.set_property("placeholder-text", "user@example.org")
++        cell.set_property("placeholder-text", "username")
+         self._connect(cell, "edited", self._jid_edited)
+         col.pack_start(cell, True)
+         col.set_attributes(cell, text=0)
+diff --git a/src/gajim/gtk/groupchat_affiliation.py b/src/gajim/gtk/groupchat_affiliation.py
+index e823613..14256ff 100644
+--- a/src/gajim/gtk/groupchat_affiliation.py
++++ b/src/gajim/gtk/groupchat_affiliation.py
+@@ -18,6 +18,7 @@
+ from gajim.common import app
+ from gajim.common.client import Client
+ from gajim.common.i18n import _
++from gajim.common.server_discovery import get_host as get_discovered_host
+ from gajim.common.modules.contacts import GroupchatContact
+ 
+ from gajim.gtk.alert import InformationAlertDialog
+@@ -303,9 +304,15 @@ def _set_affiliations(self) -> None:
+ 
+         affiliations: dict[str, dict[str, str]] = {}
+         for row in diff_rows:
+-            affiliations[row.jid] = {"affiliation": row.affiliation}
++            # 显示的是用户名，发送给服务器时后台追加动态发现的域名形成完整 JID
++            jid = row.jid
++            if "@" not in jid:
++                host = get_discovered_host()
++                if host is not None:
++                    jid = f"{jid}@{host}"
++            affiliations[jid] = {"affiliation": row.affiliation}
+             if row.nick is not None:
+-                affiliations[row.jid]["nick"] = row.nick
++                affiliations[jid]["nick"] = row.nick
+ 
+         for jid, data in affiliations.items():
+             # Send only one change at a time to work around a old prosody bug
+@@ -343,7 +350,8 @@ def _on_affiliations_received(self, task: Task) -> None:
+             affiliation_edit, jid_edit = self._allowed_to_edit(affiliation)
+             nick = attrs.get("nick") or None
+ 
+-            jid = str(jid)
++            # 显示用户名，不显示完整 JID（域名由后台处理，用户无感）
++            jid = jid.localpart or ""
+             self._store.append(
+                 [
+                     jid,
+@@ -362,5 +370,5 @@ def _on_affiliations_received(self, task: Task) -> None:
+     @staticmethod
+     def _raise_error() -> None:
+         InformationAlertDialog(
+-            _("Error"), _("An entry with this XMPP Address already exists")
++            _("Error"), _("An entry with this username already exists")
+         )
+diff --git a/src/gajim/gtk/groupchat_creation.py b/src/gajim/gtk/groupchat_creation.py
+index dbd1d41..fcfd751 100644
+--- a/src/gajim/gtk/groupchat_creation.py
++++ b/src/gajim/gtk/groupchat_creation.py
+@@ -19,6 +19,7 @@
+ from gajim.common.ged import EventHelper
+ from gajim.common.helpers import to_user_string
+ from gajim.common.i18n import _
++from gajim.common.server_discovery import get_host as get_discovered_host
+ from gajim.common.util.jid import validate_jid
+ from gajim.common.util.muc import get_random_muc_localpart
+ 
+@@ -137,7 +138,11 @@ def _get_muc_service_jid(self) -> str:
+         client = app.get_client(self._account)
+         service_jid = client.get_module("MUC").service_jid
+         if service_jid is None:
+-            return "muc.example.org"
++            # 无会议服务时，回退到动态发现的会议服务（不再用占位域名）
++            host = get_discovered_host()
++            if host is not None:
++                return f"conference.{host}"
++            return "conference"
+         return str(service_jid)
+ 
+     def _on_account_changed(
+@@ -155,9 +160,8 @@ def _on_account_changed(
+ 
+         has_muc_service = self._has_muc_service(self._account)
+         if has_muc_service:
+-            server = self._get_muc_service_jid()
+-            room_jid = f"{get_random_muc_localpart()}@{server}"
+-            self._address_entry_row.set_text(room_jid)
++            # 地址框只显示房间名（会议服务域名由后台处理，用户无感）
++            self._address_entry_row.set_text(get_random_muc_localpart())
+         else:
+             self._address_entry_row.set_text("")
+ 
+@@ -229,6 +233,9 @@ def _on_create_clicked(self, _button: Gtk.Button) -> None:
+         room_jid = self._address_entry_row.get_text()
+         if not room_jid:
+             room_jid = f"{get_random_muc_localpart()}@{self._get_muc_service_jid()}"
++        elif "@" not in room_jid:
++            # 只填了房间名，后台追加会议服务域名形成完整房间 JID
++            room_jid = f"{room_jid}@{self._get_muc_service_jid()}"
+ 
+         if not self._is_jid_valid(room_jid):
+             self._set_error(_("Invalid Address"))
+diff --git a/src/gajim/gtk/groupchat_info.py b/src/gajim/gtk/groupchat_info.py
+index 299cb1d..e8530b7 100644
+--- a/src/gajim/gtk/groupchat_info.py
++++ b/src/gajim/gtk/groupchat_info.py
+@@ -200,7 +200,7 @@ def set_info_from_contact(self, contact: GroupchatContact) -> None:
+             self.set_from_disco_info(disco_info)
+             return
+ 
+-        self._ui.address_row.set_subtitle(str(contact.jid))
++        self._ui.address_row.set_subtitle(contact.jid.localpart or "")
+         self._ui.address_copy_button.set_sensitive(True)
+ 
+     def set_from_disco_info(self, info: DiscoInfo) -> None:
+@@ -222,7 +222,7 @@ def set_from_disco_info(self, info: DiscoInfo) -> None:
+ 
+         self._contact_name_entry.update_displayed_name(name or "")
+ 
+-        self._ui.address_row.set_subtitle(str(info.jid))
++        self._ui.address_row.set_subtitle(info.jid.localpart or "")
+         self._ui.address_copy_button.set_sensitive(True)
+ 
+         self._ui.description_row.set_subtitle(make_href_markup(info.muc_description))
+diff --git a/src/gajim/gtk/groupchat_outcasts.py b/src/gajim/gtk/groupchat_outcasts.py
+index 981aaed..434e5a2 100644
+--- a/src/gajim/gtk/groupchat_outcasts.py
++++ b/src/gajim/gtk/groupchat_outcasts.py
+@@ -18,6 +18,7 @@
+ from gajim.common import app
+ from gajim.common.client import Client
+ from gajim.common.i18n import _
++from gajim.common.server_discovery import get_host as get_discovered_host
+ from gajim.common.modules.contacts import GroupchatContact
+ 
+ from gajim.gtk.alert import InformationAlertDialog
+@@ -202,12 +203,23 @@ def _set_outcasts(self) -> None:
+ 
+         outcasts = {}
+         for row in other_rows:
+-            outcasts[row.jid] = {"affiliation": "outcast"}
++            # 显示的是用户名，发送给服务器时后台追加动态发现的域名形成完整 JID
++            jid = row.jid
++            if "@" not in jid:
++                host = get_discovered_host()
++                if host is not None:
++                    jid = f"{jid}@{host}"
++            outcasts[jid] = {"affiliation": "outcast"}
+             if row.reason:
+-                outcasts[row.jid]["reason"] = row.reason
++                outcasts[jid]["reason"] = row.reason
+ 
+         for row in removed_rows:
+-            outcasts[row.jid] = {"affiliation": "none"}
++            jid = row.jid
++            if "@" not in jid:
++                host = get_discovered_host()
++                if host is not None:
++                    jid = f"{jid}@{host}"
++            outcasts[jid] = {"affiliation": "none"}
+ 
+         self._client.get_module("MUC").set_affiliation(
+             self._contact.jid, outcasts, callback=self._on_affiliation_finished
+@@ -237,7 +249,8 @@ def _on_outcasts_received(self, task: Task) -> None:
+         for jid, attrs in result.users.items():
+             reason = attrs.get("reason")
+ 
+-            jid = str(jid)
++            # 显示用户名，不显示完整 JID（域名由后台处理，用户无感）
++            jid = jid.localpart or ""
+             self._store.append([jid, reason, editable])
+ 
+             self._current_rows.add(OutcastRow(jid=jid, reason=reason))
+@@ -245,5 +258,5 @@ def _on_outcasts_received(self, task: Task) -> None:
+     @staticmethod
+     def _raise_error() -> None:
+         InformationAlertDialog(
+-            _("Error"), _("An entry with this XMPP Address already exists")
++            _("Error"), _("An entry with this username already exists")
+         )
+diff --git a/src/gajim/gtk/start_chat.py b/src/gajim/gtk/start_chat.py
+index 6c9d366..4ec51ef 100644
+--- a/src/gajim/gtk/start_chat.py
++++ b/src/gajim/gtk/start_chat.py
+@@ -39,7 +39,7 @@
+ from gajim.common.const import RFC5646_LANGUAGE_TAGS
+ from gajim.common.helpers import to_user_string
+ from gajim.common.i18n import _
+-from gajim.common.modules.contacts import BareContact
++from gajim.common.server_discovery import get_host as get_discovered_host
+ from gajim.common.modules.contacts import GroupchatContact
+ from gajim.common.modules.util import as_task
+ from gajim.common.util.jid import validate_jid
+@@ -191,7 +191,8 @@ def __init__(self, params: StartChatParam | None = None) -> None:
+         self._params: dict[JID, StartChatParam] = {}
+         if params is not None and params.jid is not None:
+             self._params[params.jid] = params
+-            self._ui.search_entry.set_text(str(params.jid))
++            # 预填只显示用户名（域名由后台处理，用户无感）
++            self._ui.search_entry.set_text(params.jid.localpart or "")
+ 
+         self._contact_view.set_loading_finished()
+ 
+@@ -407,7 +408,8 @@ def _on_search_changed(self, search_entry: Gtk.SearchEntry) -> None:
+         search_text = search_entry.get_text()
+         uri = parse_uri(search_text)
+         if isinstance(uri, XmppIri):
+-            search_entry.set_text(str(uri.jid))
++            # 粘贴的链接只显示用户名（域名由后台处理，用户无感）
++            search_entry.set_text(uri.jid.localpart or "")
+             return
+ 
+         if search_text:
+@@ -677,6 +679,11 @@ def _show_search_entry_error(self, state: bool):
+         self._ui.search_error_box.set_visible(state)
+ 
+     def _update_new_contact_items(self, search_text: str) -> None:
++        # 只填了用户名，后台追加动态发现的域名形成完整 JID
++        if "@" not in search_text:
++            host = get_discovered_host()
++            if host is not None:
++                search_text = f"{search_text}@{host}"
+         for item in self._new_contact_items.values():
+             item.props.jid = JID.from_string(search_text)
  
