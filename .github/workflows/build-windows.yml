@@ -1,7 +1,8 @@
-name: Build Gajim Windows installer
+name: Build Gajim Windows portable
 
 # 定制版 Gajim：动态服务器发现（txt 取域名 + 程序内 63114 + 用户名模式）。
 # 本仓库只放补丁与工作流；源码每次从上游固定提交拉取，保证可复现。
+# 产物为解压即运行的便携版 ZIP，不做安装包。
 
 on:
   workflow_dispatch:
@@ -42,26 +43,39 @@ jobs:
           git apply ../custom/gajim-dynamic-server.patch
           echo "patch applied"
 
-      - name: Skip MSIX packaging (upstream path typo in _base.sh)
+      - name: Skip installers (NSIS + MSIX), portable ZIP only
         shell: msys2 {0}
         working-directory: gajim
         run: |
-          # 上游 win/_base.sh 的 build_msix_installer 里图标路径写成
-          # ${DIR}/..src/gajim/...（应为 ${DIR}/../src/gajim/...），
-          # rsvg-convert 找不到文件导致整个构建在最后一步失败。
-          # 本定制只需 NSIS 的 .exe 安装包，这里在 runner 的副本里
-          # 去掉 MSIX 一步；仓库里的上游脚本保持原样不动。
-          sed -i '/^    build_msix_installer$/d' win/build.sh
-          grep -q "build_msix_installer" win/build.sh && echo "MSIX step still present!" && exit 1 || echo "MSIX step removed, NSIS installers only"
+          # 不做安装包：去掉 NSIS 与 MSIX 两步，只保留程序本体构建。
+          # （MSIX 另有上游笔误：_base.sh 图标路径写成 ${DIR}/..src/...，
+          # 应为 ${DIR}/../src/...；跳过即避开。）
+          # 这里只改 runner 的副本，仓库里的上游脚本保持原样不动。
+          sed -i '/^    build_exe_installer$/d; /^    build_msix_installer$/d' win/build.sh
+          grep -q "build_exe_installer\|build_msix_installer" win/build.sh && echo "installer step still present!" && exit 1 || echo "installer steps removed, portable ZIP only"
 
-      - name: Build installer
+      - name: Build program files
         shell: msys2 {0}
         working-directory: gajim
         run: ./win/build.sh
 
-      - name: Upload installer
+      - name: Package portable ZIP (extract and run)
+        shell: msys2 {0}
+        working-directory: gajim
+        run: |
+          cd win/_build_root
+          # 构建产物 ucrt64/ 就是完整运行环境（bin/lib/share/etc/ssl），
+          # 便携版 NSIS 也是原样拷贝这棵树。改名为 Gajim，打包成 ZIP。
+          mv ucrt64 Gajim
+          # is_portable 标记必须放在 bin/（与 Gajim.exe 同目录），
+          # Gajim 据此走便携模式：配置存程序目录，不写 %APPDATA%。
+          touch Gajim/bin/is_portable
+          7z a -tzip -mx=5 Gajim-Portable.zip Gajim
+          ls -la Gajim-Portable.zip
+
+      - name: Upload portable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: gajim-installer
-          path: gajim/win/_build_root/*.exe
+          name: gajim-portable
+          path: gajim/win/_build_root/*.zip
           if-no-files-found: error

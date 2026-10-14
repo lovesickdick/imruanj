@@ -8,11 +8,13 @@
 
 用法：
 
-1. 在本仓库页面点 **Actions** → **Build Gajim Windows installer** → **Run workflow**。
-2. 等构建完成（约 20–40 分钟），在同一页面底部下载 `gajim-installer`
-   （内含 `Gajim.exe` 安装包与 `Gajim-Portable.exe` 便携版）。
-3. 构建用 `windows-latest` + MSYS2，全程无人值守；构建脚本是 Gajim
-   官方的 `win/build.sh`，未做任何修改。
+1. 在本仓库页面点 **Actions** → **Build Gajim Windows portable** → **Run workflow**。
+2. 等构建完成（约 20–40 分钟），在同一页面底部下载 `gajim-portable`
+   （内含 `Gajim-Portable.zip`，约 160–200MB）。
+3. 解压后直接运行 `Gajim\bin\Gajim.exe` 即可，不安装、不写注册表、
+   配置存在程序目录里（便携模式），整个文件夹拷到哪都能用。
+4. 构建用 `windows-latest` + MSYS2，全程无人值守；构建脚本是 Gajim
+   官方的 `win/build.sh`，未做任何修改（仅在 runner 里跳过安装包打包步骤）。
 
 说明：
 
