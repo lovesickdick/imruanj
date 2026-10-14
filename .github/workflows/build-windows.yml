@@ -42,6 +42,18 @@ jobs:
           git apply ../custom/gajim-dynamic-server.patch
           echo "patch applied"
 
+      - name: Skip MSIX packaging (upstream path typo in _base.sh)
+        shell: msys2 {0}
+        working-directory: gajim
+        run: |
+          # 上游 win/_base.sh 的 build_msix_installer 里图标路径写成
+          # ${DIR}/..src/gajim/...（应为 ${DIR}/../src/gajim/...），
+          # rsvg-convert 找不到文件导致整个构建在最后一步失败。
+          # 本定制只需 NSIS 的 .exe 安装包，这里在 runner 的副本里
+          # 去掉 MSIX 一步；仓库里的上游脚本保持原样不动。
+          sed -i '/^    build_msix_installer$/d' win/build.sh
+          grep -q "build_msix_installer" win/build.sh && echo "MSIX step still present!" && exit 1 || echo "MSIX step removed, NSIS installers only"
+
       - name: Build installer
         shell: msys2 {0}
         working-directory: gajim
