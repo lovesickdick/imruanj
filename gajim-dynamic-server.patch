@@ -1,0 +1,538 @@
+From b13383a3ca197efd1ea6f781dd12b0e2ea487d7d Mon Sep 17 00:00:00 2001
+From: muse <muse@local>
+Date: Wed, 14 Oct 2026 09:55:12 +0800
+Subject: [PATCH] =?UTF-8?q?=E5=8A=A8=E6=80=81=E6=9C=8D=E5=8A=A1=E5=99=A8?=
+ =?UTF-8?q?=E5=8F=91=E7=8E=B0=EF=BC=9Atxt=20=E5=8F=96=E5=9F=9F=E5=90=8D=20?=
+ =?UTF-8?q?+=20=E7=A8=8B=E5=BA=8F=E5=86=85=2063114=20+=20=E7=94=A8?=
+ =?UTF-8?q?=E6=88=B7=E5=90=8D=E6=A8=A1=E5=BC=8F=20+=20=E9=9A=90=E8=97=8F?=
+ =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E5=99=A8=E8=AE=BE=E7=BD=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/gajim/common/application.py         |   5 +-
+ src/gajim/common/client.py              |  28 +++-
+ src/gajim/common/server_discovery.py    |  98 +++++++++++++
+ src/gajim/data/gui/wizard/login_page.ui |   4 +-
+ src/gajim/gtk/account_wizard.py         | 178 ++++++++++++++++++------
+ src/gajim/gtk/application.py            |   7 +
+ 6 files changed, 274 insertions(+), 46 deletions(-)
+ create mode 100644 src/gajim/common/server_discovery.py
+
+diff --git a/src/gajim/common/application.py b/src/gajim/common/application.py
+index 545dfe2..f3b8ea9 100644
+--- a/src/gajim/common/application.py
++++ b/src/gajim/common/application.py
+@@ -368,7 +368,10 @@ def create_account(
+         if not address.localpart:
+             raise ValueError("Username must be set")
+ 
+-        account_label = str(address)
++        # Customization: username-only display. The account label shown in
++        # the UI is just the username; the domain stays hidden in the
++        # full address used by the protocol.
++        account_label = address.localpart
+ 
+         config: dict[str, str | int | bool] = {
+             "address": str(address),
+diff --git a/src/gajim/common/client.py b/src/gajim/common/client.py
+index ef8f188..0ad6d2f 100644
+--- a/src/gajim/common/client.py
++++ b/src/gajim/common/client.py
+@@ -14,6 +14,7 @@
+ from gi.repository import GObject
+ from gi.repository import Gtk
+ from nbxmpp.client import Client as NBXMPPClient
++from nbxmpp.const import ConnectionProtocol
+ from nbxmpp.const import ConnectionType
+ from nbxmpp.const import StreamError
+ from nbxmpp.namespaces import Namespace
+@@ -38,7 +39,6 @@
+ from gajim.common.file_transfer_manager import FileTransfer
+ from gajim.common.helpers import determine_proxy
+ from gajim.common.helpers import get_account_proxy
+-from gajim.common.helpers import get_custom_host
+ from gajim.common.helpers import get_resource
+ from gajim.common.helpers import Observable
+ from gajim.common.helpers import warn_about_plain_connection
+@@ -585,9 +585,29 @@ def start_connect(self, ignored_tls_errors: IgnoredTlsErrorsT = None) -> None:
+             return
+ 
+         assert self._client is not None
+-        custom_host = get_custom_host(self._account)
+-        if custom_host is not None:
+-            self._client.set_custom_host(*custom_host)
++        # Customization: the connection address always comes from dynamic
++        # server discovery (txt domain + program-defined port 63114),
++        # refreshed on every connect. Never use a stale saved address and
++        # never fall back to DNS SRV. If discovery failed, do not connect.
++        from gajim.common import server_discovery
++
++        host = server_discovery.get_host()
++        if host is None:
++            self._log.warning(
++                "Server discovery failed (%s), aborting connect",
++                server_discovery.get_error(),
++            )
++            # Retry discovery in the background; the next (auto/manual)
++            # reconnect attempt will use it once it succeeds.
++            server_discovery.discover_async()
++            self._set_state(ClientState.DISCONNECTED)
++            self.notify("state-changed", SimpleClientState.DISCONNECTED)
++            return
++        self._client.set_custom_host(
++            f"{host}:{server_discovery.PORT_C2S}",
++            ConnectionProtocol.TCP,
++            ConnectionType.START_TLS,
++        )
+ 
+         gssapi = app.settings.get_account_setting(self._account, "enable_gssapi")
+         if gssapi:
+diff --git a/src/gajim/common/server_discovery.py b/src/gajim/common/server_discovery.py
+new file mode 100644
+index 0000000..93ac927
+--- /dev/null
++++ b/src/gajim/common/server_discovery.py
+@@ -0,0 +1,98 @@
++# This file is part of Gajim.
++#
++# SPDX-License-Identifier: GPL-3.0-only
++#
++# Customization: dynamic server discovery.
++# At startup the client fetches https://063063.xyz/imdizhi/myzi0.txt,
++# takes only the domain/IP part before the first colon (the port in the
++# txt file is discarded), and connects to <domain>:63114.
++# The port is defined by the program itself, never read from the txt file.
++# No caching to disk; on failure the account is put into an error state
++# and no connection is attempted.
++
++from __future__ import annotations
++
++import logging
++import threading
++import urllib.request
++
++log = logging.getLogger("gajim.c.server_discovery")
++
++DISCOVERY_URL = "https://063063.xyz/imdizhi/myzi0.txt"
++
++# The XMPP c2s port is defined by the program, not by the txt file.
++PORT_C2S = 63114
++
++_lock = threading.Lock()
++_host: str | None = None
++_error: str | None = None
++_attempted = False
++
++
++def _parse_host(text: str) -> str | None:
++    text = text.strip()
++    if not text:
++        return None
++    # Only the part before the first colon (domain/IP); discard the port.
++    host = text.split(":")[0].strip()
++    return host or None
++
++
++def discover() -> bool:
++    """Fetch the txt file and extract the server domain/IP.
++
++    Blocking call, runs the network request on the calling thread.
++    Returns True on success.
++    """
++    global _host, _error, _attempted
++    with _lock:
++        _attempted = True
++        try:
++            request = urllib.request.Request(
++                DISCOVERY_URL, headers={"User-Agent": "gajim"})
++            with urllib.request.urlopen(request, timeout=10) as response:
++                text = response.read().decode("utf-8", errors="replace")
++            host = _parse_host(text)
++            if host is None:
++                _host = None
++                _error = "empty discovery response"
++                log.warning("Server discovery: empty response")
++                return False
++            _host = host
++            _error = None
++            log.info("Server discovery: using host %s", host)
++            return True
++        except Exception as error:  # noqa: BLE001
++            _host = None
++            _error = str(error)
++            log.warning("Server discovery failed: %s", error)
++            return False
++
++
++def discover_async() -> None:
++    """Run discover() in a background thread (for application startup)."""
++    thread = threading.Thread(target=discover, name="server-discovery", daemon=True)
++    thread.start()
++
++
++def get_host() -> str | None:
++    with _lock:
++        return _host
++
++
++def get_error() -> str | None:
++    with _lock:
++        return _error
++
++
++def is_attempted() -> bool:
++    with _lock:
++        return _attempted
++
++
++def get_server_address() -> str | None:
++    """Return '<host>:<port>' for the XMPP c2s connection, or None."""
++    host = get_host()
++    if host is None:
++        return None
++    return f"{host}:{PORT_C2S}"
+diff --git a/src/gajim/data/gui/wizard/login_page.ui b/src/gajim/data/gui/wizard/login_page.ui
+index 9687a7e..6f564f2 100644
+--- a/src/gajim/data/gui/wizard/login_page.ui
++++ b/src/gajim/data/gui/wizard/login_page.ui
+@@ -32,9 +32,9 @@
+           <object class="GtkEntry" id="_log_in_address_entry">
+             <property name="width-request">300</property>
+             <property name="focusable">1</property>
+-            <property name="tooltip-text" translatable="yes">Your XMPP address (e.g. user@example.org)</property>
++            <property name="tooltip-text" translatable="yes">Your username (without @domain)</property>
+             <property name="activates-default">1</property>
+-            <property name="placeholder-text">user@example.org</property>
++            <property name="placeholder-text" translatable="yes">username</property>
+           </object>
+         </child>
+         <child>
+diff --git a/src/gajim/gtk/account_wizard.py b/src/gajim/gtk/account_wizard.py
+index 9298f8b..78089df 100644
+--- a/src/gajim/gtk/account_wizard.py
++++ b/src/gajim/gtk/account_wizard.py
+@@ -41,6 +41,10 @@
+ from gajim.common.helpers import get_global_proxy
+ from gajim.common.helpers import get_proxy
+ from gajim.common.i18n import _
++from gajim.common.server_discovery import PORT_C2S
++from gajim.common.server_discovery import discover as discover_server
++from gajim.common.server_discovery import get_error as get_discovery_error
++from gajim.common.server_discovery import get_host as get_discovered_host
+ from gajim.common.util.jid import validate_jid
+ from gajim.common.util.text import get_country_flag_from_code
+ 
+@@ -263,9 +267,40 @@ def _get_proxy_data(self, advanced: bool) -> ProxyData | None:
+ 
+         return get_global_proxy()
+ 
++    def _ensure_discovery(self) -> str | None:
++        # Customization: make sure server discovery has run and succeeded.
++        # Returns the discovered domain/IP, or None on failure (caller must
++        # not connect in that case).
++        host = get_discovered_host()
++        if host is None:
++            # Discovery may not have finished yet (e.g. slow network at
++            # startup); try once synchronously before giving up.
++            if discover_server():
++                host = get_discovered_host()
++        if host is None:
++            log.warning(
++                "Server discovery failed, not connecting: %s", get_discovery_error()
++            )
++        return host
++
++    def _get_discovered_custom_host(self) -> CustomHostT | None:
++        # Customization: the connection address always comes from dynamic
++        # server discovery (txt domain + program-defined port). The user
++        # never enters a server address; manual "advanced" settings are
++        # ignored. Returns None when discovery failed (caller must not
++        # connect in that case).
++        host = self._ensure_discovery()
++        if host is None:
++            return None
++        return (
++            f"{host}:{PORT_C2S}",
++            ConnectionProtocol.TCP,
++            ConnectionType.START_TLS,
++        )
++
+     def _get_base_client(
+         self, address: JID, mode: Mode, advanced: bool, ignore_all_errors: bool
+-    ) -> NBXMPPClient:
++    ) -> NBXMPPClient | None:
+         client = NBXMPPClient(log_context="Account Wizard")
+         client.set_domain(address.domain)
+         client.set_username(address.localpart)
+@@ -273,10 +308,12 @@ def _get_base_client(
+         client.set_ignore_tls_errors(ignore_all_errors)
+         client.set_accepted_certificates(app.cert_store.get_certificates())
+ 
+-        if advanced:
+-            custom_host = self.get_page("advanced").get_custom_host()
+-            if custom_host is not None:
+-                client.set_custom_host(*custom_host)
++        # Customization: always use the discovered server address, never the
++        # manually entered one.
++        custom_host = self._get_discovered_custom_host()
++        if custom_host is None:
++            return None
++        client.set_custom_host(*custom_host)
+ 
+         proxy_data = self._get_proxy_data(advanced)
+         client.set_proxy(proxy_data)
+@@ -329,13 +366,22 @@ def _on_host_meta_response(obj: FileTransfer) -> None:
+ 
+     def _test_credentials(self, ignore_all_errors: bool = False) -> None:
+         self._show_progress_page(_("Connecting..."), _("Connecting to server..."))
+-        jid, password = self.get_page("login").get_credentials()
+-        address = JID.from_string(jid)
++        # Customization: username-only mode, domain comes from discovery.
++        username = self.get_page("login").get_username()
++        password = self.get_page("login").get_password()
++        domain = self._ensure_discovery()
++        if domain is None:
++            self._show_discovery_error()
++            return
++        address = JID.from_string(f"{username}@{domain}")
+         advanced = self.get_page("login").is_advanced()
+ 
+         self._client = self._get_base_client(
+             address, Mode.LOGIN_TEST, advanced, ignore_all_errors
+         )
++        if self._client is None:
++            self._show_discovery_error()
++            return
+ 
+         self._client.set_password(password)
+         self._client.subscribe("login-successful", self._on_login_successful)
+@@ -343,7 +389,10 @@ def _test_credentials(self, ignore_all_errors: bool = False) -> None:
+ 
+     def _test_anonymous_server(self, ignore_all_errors: bool = False) -> None:
+         self._show_progress_page(_("Connecting..."), _("Connecting to server..."))
+-        domain = self.get_page("signup").get_server()
++        domain = self._ensure_discovery()
++        if domain is None:
++            self._show_discovery_error()
++            return
+         advanced = self.get_page("signup").is_advanced()
+ 
+         address = JID(localpart=None, domain=domain, resource=None)
+@@ -351,13 +400,19 @@ def _test_anonymous_server(self, ignore_all_errors: bool = False) -> None:
+         self._client = self._get_base_client(
+             address, Mode.ANONYMOUS_TEST, advanced, ignore_all_errors
+         )
++        if self._client is None:
++            self._show_discovery_error()
++            return
+ 
+         self._client.subscribe("anonymous-supported", self._on_anonymous_supported)
+         self._request_host_meta_and_connect(self._client, advanced)
+ 
+     def _register_with_server(self, ignore_all_errors: bool = False) -> None:
+         self._show_progress_page(_("Connecting..."), _("Connecting to server..."))
+-        domain = self.get_page("signup").get_server()
++        domain = self._ensure_discovery()
++        if domain is None:
++            self._show_discovery_error()
++            return
+         advanced = self.get_page("signup").is_advanced()
+ 
+         address = JID(localpart=None, domain=domain, resource=None)
+@@ -365,10 +420,25 @@ def _register_with_server(self, ignore_all_errors: bool = False) -> None:
+         self._client = self._get_base_client(
+             address, Mode.REGISTER, advanced, ignore_all_errors
+         )
++        if self._client is None:
++            self._show_discovery_error()
++            return
+ 
+         self._client.subscribe("connected", self._on_connected)
+         self._request_host_meta_and_connect(self._client, advanced)
+ 
++    def _show_discovery_error(self) -> None:
++        # Customization: server discovery failed: show a clear error, do not
++        # connect, do not fall back to any cached address.
++        self._show_error_page(
++            _("Server not found"),
++            _("Server not found"),
++            _(
++                "Gajim could not determine the server address. "
++                "Please check your network connection and try again."
++            ),
++        )
++
+     def _on_login_successful(self, client: NBXMPPClient, _signal_name: str) -> None:
+         assert client.domain is not None
+         assert client.password is not None
+@@ -615,6 +685,9 @@ def __init__(self) -> None:
+         self._connect(self._log_in_button, "clicked", self._on_login)
+         self._connect(self._sign_up_button, "clicked", self._on_signup)
+ 
++        # Customization: username-only mode, hide manual server settings.
++        self._login_advanced_checkbutton.set_visible(False)
++
+     def focus(self) -> None:
+         self._log_in_address_entry.grab_focus()
+ 
+@@ -644,27 +717,39 @@ def _on_password_entry_activate(self, _entry: Gtk.Entry) -> None:
+         if self._log_in_button.get_sensitive():
+             self._log_in_button.activate()
+ 
+-    def _validate_jid(self, address: str) -> bool:
+-        if not address:
++    def _validate_username(self, username: str) -> bool:
++        # Customization: username-only mode. The user types only the
++        # username (e.g. "test"); the domain is appended automatically
++        # from server discovery and is never shown or entered.
++        if not username:
+             self._show_icon(False)
+             return False
+ 
+-        try:
+-            jid = validate_jid(address, type_="bare")
+-            if jid.resource:
+-                raise ValueError
+-        except ValueError:
++        if "@" in username:
+             self._show_icon(True)
+             self._log_in_address_entry.set_icon_tooltip_text(
+-                Gtk.EntryIconPosition.SECONDARY, _("Invalid Address")
++                Gtk.EntryIconPosition.SECONDARY,
++                _("Enter only your username, without @domain"),
+             )
+             return False
+ 
+-        if app.settings.account_exists(address):
++        try:
++            domain = get_discovered_host()
++            if domain is not None:
++                jid = validate_jid(f"{username}@{domain}", type_="bare")
++                if jid.resource:
++                    raise ValueError
++                if app.settings.account_exists(str(jid)):
++                    self._show_icon(True)
++                    self._log_in_address_entry.set_icon_tooltip_text(
++                        Gtk.EntryIconPosition.SECONDARY,
++                        _("This account has already been added"),
++                    )
++                    return False
++        except ValueError:
+             self._show_icon(True)
+             self._log_in_address_entry.set_icon_tooltip_text(
+-                Gtk.EntryIconPosition.SECONDARY,
+-                _("This account has already been added"),
++                Gtk.EntryIconPosition.SECONDARY, _("Invalid username")
+             )
+             return False
+ 
+@@ -672,18 +757,19 @@ def _validate_jid(self, address: str) -> bool:
+         return True
+ 
+     def _set_complete(self, *args: Any) -> None:
+-        address = self._validate_jid(self._log_in_address_entry.get_text())
++        username = self._validate_username(
++            self._log_in_address_entry.get_text().strip())
+         password = self._log_in_password_entry.get_text()
+-        self._log_in_button.set_sensitive(bool(address and password))
++        self._log_in_button.set_sensitive(bool(username and password))
+ 
+     def is_advanced(self) -> bool:
+         return self._login_advanced_checkbutton.get_active()
+ 
+-    def get_credentials(self) -> tuple[str, str]:
+-        return (
+-            self._log_in_address_entry.get_text(),
+-            self._log_in_password_entry.get_text(),
+-        )
++    def get_username(self) -> str:
++        return self._log_in_address_entry.get_text().strip()
++
++    def get_password(self) -> str:
++        return self._log_in_password_entry.get_text()
+ 
+ 
+ @Gtk.Template(string=get_ui_string("wizard/signup_page.ui"))
+@@ -705,6 +791,15 @@ def __init__(self) -> None:
+         self._servers: list[dict[str, Any]] = []
+         self._provider_list_request: FileTransfer | None = None
+ 
++        # Customization: the server always comes from dynamic server
++        # discovery. Hide the manual server picker (combobox, provider
++        # list, info box); the user never sees or picks a domain.
++        self._server_comboboxtext_sign_up.set_visible(False)
++        self._update_provider_list_icon.set_visible(False)
++        self._sign_up_info_grid.set_visible(False)
++        self._popover.set_visible(False)
++        self._sign_up_advanced_checkbutton.set_visible(False)
++
+         entry = self._server_comboboxtext_sign_up.get_child()
+         assert isinstance(entry, Gtk.Entry)
+         self._entry = entry
+@@ -732,18 +827,18 @@ def focus(self) -> None:
+         self._entry.grab_focus()
+ 
+     def update_providers_list(self) -> None:
+-        if len(self._servers) > 0 or self._provider_list_request is not None:
+-            # A request has already been started
+-            return
+-
+-        self._server_comboboxtext_sign_up.set_sensitive(False)
+-        self._update_provider_list_icon.add_css_class("spin")
++        # Customization: server picker is hidden, no provider list needed.
++        return
+ 
+-        self._provider_list_request = app.ftm.http_request(
+-            "GET",
+-            app.settings.get_app_setting("providers_list_url"),
+-            callback=self._on_download_provider_list_finished,
+-        )
++    def _set_complete(self, *args: Any) -> None:
++        # Customization: completeness depends only on discovery success.
++        try:
++            self.get_server()
++        except Exception:
++            self.complete = False
++        else:
++            self.complete = True
++        self.update_page_complete()
+ 
+     def _on_download_provider_list_finished(self, obj: FileTransfer) -> None:
+         self._provider_list_request = None
+@@ -864,7 +959,12 @@ def is_advanced(self) -> bool:
+         return self._sign_up_advanced_checkbutton.get_active()
+ 
+     def get_server(self) -> str:
+-        return validate_domainpart(self._entry.get_text())
++        # Customization: the server always comes from dynamic server
++        # discovery, never from user input.
++        domain = get_discovered_host()
++        if domain is None:
++            raise ValueError("Server discovery failed")
++        return validate_domainpart(domain)
+ 
+     def get_visible_buttons(self) -> list[str]:
+         return ["back", "signup"]
+diff --git a/src/gajim/gtk/application.py b/src/gajim/gtk/application.py
+index d0233e3..9b125b6 100644
+--- a/src/gajim/gtk/application.py
++++ b/src/gajim/gtk/application.py
+@@ -210,6 +210,13 @@ def _startup(self) -> None:
+         if not self._init_core(in_memory=False):
+             return
+ 
++        # Customization: start dynamic server discovery in the background.
++        # The XMPP c2s address (txt domain + program-defined port 63114)
++        # is resolved before any account connects.
++        from gajim.common.server_discovery import discover_async
++
++        discover_async()
++
+         icon_theme = get_icon_theme()
+         icon_theme.add_search_path(str(configpaths.get("ICONS")))
+ 
+-- 
+2.43.0
+

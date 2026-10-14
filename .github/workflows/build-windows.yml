@@ -1,0 +1,55 @@
+name: Build Gajim Windows installer
+
+# 定制版 Gajim：动态服务器发现（txt 取域名 + 程序内 63114 + 用户名模式）。
+# 本仓库只放补丁与工作流；源码每次从上游固定提交拉取，保证可复现。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Disable CRLF conversion (keep LF for shell scripts)
+        run: git config --global core.autocrlf false
+
+      - name: Checkout this repo (patch + workflow)
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
+      - name: Checkout upstream Gajim source (pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: gajim/gajim
+          ref: b3a40f2
+          path: gajim
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: git
+
+      - name: Apply customization patch
+        shell: msys2 {0}
+        working-directory: gajim
+        run: |
+          git config --global core.autocrlf false
+          git apply --check ../custom/gajim-dynamic-server.patch
+          git apply ../custom/gajim-dynamic-server.patch
+          echo "patch applied"
+
+      - name: Build installer
+        shell: msys2 {0}
+        working-directory: gajim
+        run: ./win/build.sh
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: gajim-installer
+          path: gajim/win/_build_root/*.exe
+          if-no-files-found: error
