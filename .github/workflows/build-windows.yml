@@ -19,11 +19,11 @@ jobs:
         with:
           path: custom
 
-      - name: Checkout upstream Gajim source (pinned commit)
+      - name: Checkout upstream Gajim source (pinned commit, full SHA)
         uses: actions/checkout@v4
         with:
           repository: gajim/gajim
-          ref: b3a40f2
+          ref: b3a40f2fcae0564c7892fad21caded759e9ab78a
           path: gajim
 
       - name: Set up MSYS2 (UCRT64)
