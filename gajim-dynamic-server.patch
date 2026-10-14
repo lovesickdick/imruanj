@@ -15,7 +15,7 @@ index 545dfe2..f3b8ea9 100644
          config: dict[str, str | int | bool] = {
              "address": str(address),
 diff --git a/src/gajim/common/client.py b/src/gajim/common/client.py
-index ef8f188..0ad6d2f 100644
+index ef8f188..4fc0611 100644
 --- a/src/gajim/common/client.py
 +++ b/src/gajim/common/client.py
 @@ -14,6 +14,7 @@
@@ -34,7 +34,98 @@ index ef8f188..0ad6d2f 100644
  from gajim.common.helpers import get_resource
  from gajim.common.helpers import Observable
  from gajim.common.helpers import warn_about_plain_connection
-@@ -585,9 +585,29 @@ def start_connect(self, ignored_tls_errors: IgnoredTlsErrorsT = None) -> None:
+@@ -95,6 +95,15 @@ def __init__(self, account: str) -> None:
+         self._remove_account = False
+         self._connectivity = Gio.NetworkConnectivity.FULL
+ 
++        # Customization: discovery-refresh state for start_connect().
++        # Every (re)connect re-fetches the txt file first; these track
++        # the in-flight refresh so concurrent start_connect calls adopt
++        # it instead of spawning duplicate fetches, and the generation
++        # invalidates a refresh superseded by an abort/offline.
++        self._discovery_refresh_pending = False
++        self._discovery_refresh_generation = 0
++        self._pending_ignored_tls_errors: IgnoredTlsErrorsT = None
++
+         self._destroyed = False
+ 
+         modules.register_modules(self)
+@@ -243,6 +252,11 @@ def start_disconnect(
+         self._reconnect = reconnect
+         self._destroy_client = destroy_client
+ 
++        if not reconnect:
++            # The user is going offline: invalidate any in-flight
++            # discovery refresh so its callback does not reconnect.
++            self._discovery_refresh_generation += 1
++
+         if self._state.is_reconnect_scheduled:
+             self._abort_reconnect()
+             if reconnect:
+@@ -575,6 +589,62 @@ def _send_message(self, message: OutgoingMessage) -> None:
+         self.get_module("Message").store_message(message)
+ 
+     def start_connect(self, ignored_tls_errors: IgnoredTlsErrorsT = None) -> None:
++        # Customization: every (re)connect first re-fetches the txt
++        # file, so a server address change takes effect without
++        # restarting the client. The fetch runs in a background thread;
++        # the actual connect happens in _connect_with_fresh_host once
++        # the fetch completes.
++        if self._state not in (
++            ClientState.DISCONNECTED,
++            ClientState.RECONNECT_SCHEDULED,
++        ):
++            # Do not try to reco while we are already trying
++            return
++
++        if self._discovery_refresh_pending:
++            # A refresh is already in flight; its callback will continue
++            # the connect. Remember the latest ignored_tls_errors.
++            self._pending_ignored_tls_errors = ignored_tls_errors
++            return
++
++        self._pending_ignored_tls_errors = ignored_tls_errors
++        self._discovery_refresh_pending = True
++        self._discovery_refresh_generation += 1
++        generation = self._discovery_refresh_generation
++
++        from gajim.common import server_discovery
++
++        server_discovery.discover_async(
++            lambda: self._on_discovery_refreshed(generation)
++        )
++
++    def _on_discovery_refreshed(self, generation: int) -> None:
++        # Called on the discovery worker thread. Hop to the main thread;
++        # the connect itself must run there (GTK/nbxmpp state).
++        GLib.idle_add(self._continue_connect_after_discovery, generation)
++
++    def _continue_connect_after_discovery(self, generation: int) -> bool:
++        self._discovery_refresh_pending = False
++        if self._destroyed:
++            return False
++        if generation != self._discovery_refresh_generation:
++            # Superseded by an abort/offline (generation bumped).
++            return False
++        if not self._reconnect:
++            return False
++        if self._state not in (
++            ClientState.DISCONNECTED,
++            ClientState.RECONNECT_SCHEDULED,
++        ):
++            return False
++        ignored_tls_errors = self._pending_ignored_tls_errors
++        self._pending_ignored_tls_errors = None
++        self._connect_with_fresh_host(ignored_tls_errors)
++        return False
++
++    def _connect_with_fresh_host(
++        self, ignored_tls_errors: IgnoredTlsErrorsT = None
++    ) -> None:
+         self._log.info("Connect")
+ 
+         if self._state not in (
+@@ -585,9 +655,29 @@ def start_connect(self, ignored_tls_errors: IgnoredTlsErrorsT = None) -> None:
              return
  
          assert self._client is not None
@@ -67,12 +158,22 @@ index ef8f188..0ad6d2f 100644
  
          gssapi = app.settings.get_account_setting(self._account, "enable_gssapi")
          if gssapi:
+@@ -672,6 +762,9 @@ def _schedule_reconnect(self) -> None:
+     def _abort_reconnect(self) -> None:
+         self._set_state(ClientState.DISCONNECTED)
+         self._disable_reconnect_timer()
++        # Invalidate any in-flight discovery refresh: the user no
++        # longer wants to (re)connect.
++        self._discovery_refresh_generation += 1
+ 
+         if self._destroy_client:
+             self._create_client()
 diff --git a/src/gajim/common/server_discovery.py b/src/gajim/common/server_discovery.py
 new file mode 100644
-index 0000000..93ac927
+index 0000000..4e646ee
 --- /dev/null
 +++ b/src/gajim/common/server_discovery.py
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,110 @@
 +# This file is part of Gajim.
 +#
 +# SPDX-License-Identifier: GPL-3.0-only
@@ -90,6 +191,7 @@ index 0000000..93ac927
 +import logging
 +import threading
 +import urllib.request
++from collections.abc import Callable
 +
 +log = logging.getLogger("gajim.c.server_discovery")
 +
@@ -144,9 +246,20 @@ index 0000000..93ac927
 +            return False
 +
 +
-+def discover_async() -> None:
-+    """Run discover() in a background thread (for application startup)."""
-+    thread = threading.Thread(target=discover, name="server-discovery", daemon=True)
++def discover_async(callback: Callable[[], None] | None = None) -> None:
++    """Run discover() in a background thread (for application startup).
++
++    If callback is given, it is invoked on the worker thread after the
++    fetch completes (success or failure). The caller must hop to the
++    main thread itself if it touches UI/GTK state.
++    """
++
++    def _run() -> None:
++        discover()
++        if callback is not None:
++            callback()
++
++    thread = threading.Thread(target=_run, name="server-discovery", daemon=True)
 +    thread.start()
 +
 +
