@@ -55,6 +55,48 @@ jobs:
           sed -i '/Downgrade pango/d; /pango-1.56.4-3/d' win/_base.sh
           grep -q "pango-1.56" win/_base.sh && echo "Pango pin still present!" && exit 1 || echo "Pango pin removed, pacman will install consistent Pango+GTK4"
 
+      - name: Add retry for transient download failures (pacman + pip)
+        shell: msys2 {0}
+        working-directory: gajim
+        run: |
+          # 构建时 pacman/pip 下载偶发失败（仓库同步、CDN 抖动），
+          # 失败一次就葬送整轮 40 分钟构建。追加同名函数覆盖原定义
+          # （bash 中后定义覆盖先定义），每条命令失败重试 3 次。
+          # 这里只改 runner 的副本，仓库里的上游脚本保持原样不动。
+          cat >> win/_base.sh <<'EOF'
+
+          # CI robustness: retry transient download failures (repo/CDN hiccups).
+          # Overrides the build_pacman / build_pip_install definitions above.
+          function build_pacman {
+              local attempt=1
+              while [ $attempt -le 3 ]; do
+                  if pacman --root "${BUILD_ROOT}" "$@"; then
+                      return 0
+                  fi
+                  echo "build_pacman attempt $attempt failed, retrying in 10s..."
+                  sleep 10
+                  attempt=$((attempt + 1))
+              done
+              echo "build_pacman failed after 3 attempts"
+              return 1
+          }
+
+          function build_pip_install {
+              local attempt=1
+              while [ $attempt -le 3 ]; do
+                  if "${BUILD_ROOT}"/"${MSYSTEM_PREFIX:1}"/bin/"${PYTHON_ID}".exe -m pip install --break-system-packages "$@"; then
+                      return 0
+                  fi
+                  echo "build_pip_install attempt $attempt failed, retrying in 10s..."
+                  sleep 10
+                  attempt=$((attempt + 1))
+              done
+              echo "build_pip_install failed after 3 attempts"
+              return 1
+          }
+          EOF
+          bash -n win/_base.sh && echo "_base.sh syntax OK after retry patch"
+
       - name: Skip installers (NSIS + MSIX), portable ZIP only
         shell: msys2 {0}
         working-directory: gajim
