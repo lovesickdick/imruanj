@@ -79,3 +79,17 @@ jobs:
           name: gajim-portable
           path: gajim/win/_build_root/*.zip
           if-no-files-found: error
+
+      - name: Upload built files on failure (rescue, do not lose an hour of build)
+        # 兜底：前面任何一步失败，已生成的文件也要上传，不让一小时构建白跑。
+        # 成功时不执行；失败时把 ZIP（若已生成）和程序目录（Gajim/ 或未改名的 ucrt64/）
+        # 原样传上来，用户仍可下载使用或排查。任一路径不存在则跳过该路径。
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gajim-built-files-rescue
+          path: |
+            gajim/win/_build_root/Gajim-Portable.zip
+            gajim/win/_build_root/Gajim/
+            gajim/win/_build_root/ucrt64/
+          if-no-files-found: warn
