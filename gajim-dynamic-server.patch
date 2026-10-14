@@ -15,7 +15,7 @@ index 545dfe2..f3b8ea9 100644
          config: dict[str, str | int | bool] = {
              "address": str(address),
 diff --git a/src/gajim/common/client.py b/src/gajim/common/client.py
-index ef8f188..4fc0611 100644
+index ef8f188..2e41bfd 100644
 --- a/src/gajim/common/client.py
 +++ b/src/gajim/common/client.py
 @@ -14,6 +14,7 @@
@@ -62,7 +62,40 @@ index ef8f188..4fc0611 100644
          if self._state.is_reconnect_scheduled:
              self._abort_reconnect()
              if reconnect:
-@@ -575,6 +589,62 @@ def _send_message(self, message: OutgoingMessage) -> None:
+@@ -294,14 +308,24 @@ def _on_disconnected(self, _client: NBXMPPClient, _signal_name: str) -> None:
+             cert, errors = self._client.peer_certificate
+             assert errors is not None
+ 
+-            open_window(
+-                "SSLErrorDialog",
+-                account=self._account,
+-                client=self,
+-                cert=cert,
+-                ignored_errors=set(self._client.ignored_tls_errors),
+-                error=errors.pop(),
+-            )
++            # 自动信任：不弹出证书确认框，直接信任证书并重连（用户要求：默认信任，不弹框）
++            # 证书已在信任库中时，自动信任无法修复问题，回退到弹窗让用户决定（防无限重连）
++            if cert is not None and not any(
++                c.is_same(cert) for c in app.cert_store.get_certificates()
++            ):
++                app.cert_store.add_certificate(cert)
++                ignored = set(self._client.ignored_tls_errors) | set(errors)
++                # 延迟到 _on_disconnected 返回后重连（此时客户端已重建）
++                GLib.idle_add(self.start_connect, ignored)
++            else:
++                open_window(
++                    "SSLErrorDialog",
++                    account=self._account,
++                    client=self,
++                    cert=cert,
++                    ignored_errors=set(self._client.ignored_tls_errors),
++                    error=errors.pop(),
++                )
+ 
+         elif domain in (StreamError.STREAM, StreamError.BIND):
+             if error == "conflict":
+@@ -575,6 +599,62 @@ def _send_message(self, message: OutgoingMessage) -> None:
          self.get_module("Message").store_message(message)
  
      def start_connect(self, ignored_tls_errors: IgnoredTlsErrorsT = None) -> None:
@@ -125,7 +158,7 @@ index ef8f188..4fc0611 100644
          self._log.info("Connect")
  
          if self._state not in (
-@@ -585,9 +655,29 @@ def start_connect(self, ignored_tls_errors: IgnoredTlsErrorsT = None) -> None:
+@@ -585,9 +665,29 @@ def start_connect(self, ignored_tls_errors: IgnoredTlsErrorsT = None) -> None:
              return
  
          assert self._client is not None
@@ -158,7 +191,7 @@ index ef8f188..4fc0611 100644
  
          gssapi = app.settings.get_account_setting(self._account, "enable_gssapi")
          if gssapi:
-@@ -672,6 +762,9 @@ def _schedule_reconnect(self) -> None:
+@@ -672,6 +772,9 @@ def _schedule_reconnect(self) -> None:
      def _abort_reconnect(self) -> None:
          self._set_state(ClientState.DISCONNECTED)
          self._disable_reconnect_timer()
