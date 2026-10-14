@@ -59,17 +59,33 @@ jobs:
         working-directory: gajim
         run: ./win/build.sh
 
-      - name: Package portable ZIP (extract and run)
+      - name: Prepare portable folder
         shell: msys2 {0}
         working-directory: gajim
         run: |
           cd win/_build_root
           # 构建产物 ucrt64/ 就是完整运行环境（bin/lib/share/etc/ssl），
-          # 便携版 NSIS 也是原样拷贝这棵树。改名为 Gajim，打包成 ZIP。
+          # 便携版 NSIS 也是原样拷贝这棵树。改名为 Gajim。
           mv ucrt64 Gajim
           # is_portable 标记必须放在 bin/（与 Gajim.exe 同目录），
           # Gajim 据此走便携模式：配置存程序目录，不写 %APPDATA%。
           touch Gajim/bin/is_portable
+          ls -la Gajim/bin/Gajim.exe Gajim/bin/is_portable
+
+      - name: Upload portable folder immediately (do not wait for ZIP)
+        # 即时上传铁律：程序目录一就绪马上上传，不等 ZIP 打包；
+        # 打包失败也不丢已生成文件。
+        uses: actions/upload-artifact@v4
+        with:
+          name: gajim-portable-folder
+          path: gajim/win/_build_root/Gajim/
+          if-no-files-found: error
+
+      - name: Package portable ZIP (extract and run)
+        shell: msys2 {0}
+        working-directory: gajim
+        run: |
+          cd win/_build_root
           7z a -tzip -mx=5 Gajim-Portable.zip Gajim
           ls -la Gajim-Portable.zip
 
