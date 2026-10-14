@@ -43,6 +43,18 @@ jobs:
           git apply ../custom/gajim-dynamic-server.patch
           echo "patch applied"
 
+      - name: Remove stale Pango 1.56.4 pin (breaks current GTK4)
+        shell: msys2 {0}
+        working-directory: gajim
+        run: |
+          # 上游 win/_base.sh 把 Pango 钉死在 1.56.4-3（躲某个 Pango 回归 bug）。
+          # 但仓库现在的 GTK4 调用 pango_attr_width_new（Pango 1.58 才引入），
+          # 钉死的 1.56.4 没有这个函数，启动报“无法定位程序输入点”，
+          # 整个应用打不开。去掉钉死，让 pacman 装与当前 GTK4 一致的 Pango。
+          # 这里只改 runner 的副本，仓库里的上游脚本保持原样不动。
+          sed -i '/Downgrade pango/d; /pango-1.56.4-3/d' win/_base.sh
+          grep -q "pango-1.56" win/_base.sh && echo "Pango pin still present!" && exit 1 || echo "Pango pin removed, pacman will install consistent Pango+GTK4"
+
       - name: Skip installers (NSIS + MSIX), portable ZIP only
         shell: msys2 {0}
         working-directory: gajim
